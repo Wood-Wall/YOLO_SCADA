@@ -1,0 +1,31 @@
+# Python 缓存（自动生成的，没必要提交）
+__pycache__/
+*.pyc
+*.pyo
+
+# 虚拟环境（你自己的环境，别人用不了）
+D:/conda/envs/yolov8_env/
+.venv/
+env/
+
+# 训练结果（每次训练都不一样，太大）
+runs/
+
+# 数据集（太大）
+dataset/
+datasets/
+
+# YOLO 模型权重（可以自己下载，没必要提交）
+*.pt
+
+# 视频/图片结果（每次运行生成的）
+*.mp4
+result_*.jpg
+
+# IDE 配置
+.vscode/
+.idea/
+
+# 系统文件
+Thumbs.db
+.DS_Store
