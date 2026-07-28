@@ -16,6 +16,7 @@
 from __future__ import annotations
 import argparse
 import sys
+import time
 import cv2
 
 from config import AppConfig
@@ -23,6 +24,7 @@ from core.engine import AbandonedDetectorEngine
 from core.alert import AlertInfo
 from utils.video import VideoSourceFactory
 from utils.visualization import Visualizer
+from utils.logger import LogManager
 
 
 def parse_args() -> argparse.Namespace:
@@ -53,28 +55,23 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def print_startup_info(config: AppConfig):
-    """打印启动信息"""
-    print("=" * 50)
-    print("  异物留置检测系统启动")
-    print("=" * 50)
-    print(f"  模型: {config.model_path}")
-    print(f"  视频源: {config.video_source}")
-    print(f"  告警阈值: {config.abandon_seconds}s")
-    print(f"  保存视频: {config.save_result}")
-    print(f"  检测间隔: 每 {config.detect_interval} 帧")
-    print("-" * 50)
-    print("  按键:  q=退出  r=重置追踪器")
-    print("=" * 50)
-    print()
-
-
 def main():
     """主函数"""
     args = parse_args()
 
     # ── 加载配置 ──
     config = AppConfig.from_yaml(args.config)
+
+    # ── 初始化日志系统（必须在任何输出之前） ──
+    LogManager.init(
+        log_dir=config.log_dir,
+        level=config.log_level,
+        max_bytes=config.log_max_bytes,
+        backup_count=config.log_backup_count,
+        console_level=config.log_console_level,
+        file_level=config.log_file_level,
+    )
+    logger = LogManager.get_logger("main")
 
     # 命令行参数覆盖配置
     if args.video is not None:
@@ -86,27 +83,38 @@ def main():
     if args.model is not None:
         config.model_path = args.model
 
-    # 打印启动信息
-    print_startup_info(config)
+    # ── 打印启动信息 ──
+    logger.info("=" * 50)
+    logger.info("异物留置检测系统启动")
+    logger.info("=" * 50)
+    logger.info(f"  模型: {config.model_path}")
+    logger.info(f"  视频源: {config.video_source}")
+    logger.info(f"  告警阈值: {config.abandon_seconds}s")
+    logger.info(f"  保存视频: {config.save_result}")
+    logger.info(f"  检测间隔: 每 {config.detect_interval} 帧")
+    logger.info("-" * 50)
+    logger.info("  按键:  q=退出  r=重置追踪器")
+    logger.info("=" * 50)
 
     # ── 创建视频源 ──
     video_source = VideoSourceFactory.create(config.video_source)
     if not video_source._open():
-        print(f"❌ 无法打开视频源: {config.video_source}")
+        logger.error(f"无法打开视频源: {config.video_source}")
         sys.exit(1)
 
-    print(f"  视频信息: {video_source.frame_size[0]}×{video_source.frame_size[1]}, "
-          f"{video_source.fps:.1f} FPS")
+    logger.info(
+        f"  视频信息: {video_source.frame_size[0]}×{video_source.frame_size[1]}, "
+        f"{video_source.fps:.1f} FPS"
+    )
     if video_source.total_frames > 0:
-        print(f"  总帧数: {video_source.total_frames}")
-    print()
+        logger.info(f"  总帧数: {video_source.total_frames}")
 
     # ── 创建引擎 ──
     engine = AbandonedDetectorEngine(config)
 
-    # 注册告警回调 → 打印到终端
+    # 注册告警回调 → 同时写日志
     def on_alert(alert: AlertInfo):
-        print(f"⚠️ 告警: {alert.message}")
+        logger.warning(f"⚠️ 告警: {alert.message}")
     engine.alert_manager.attach(on_alert)
 
     # ── 视频写入器（如果需要保存） ──
@@ -118,10 +126,9 @@ def main():
             video_source.fps,
             video_source.frame_size
         )
-        print(f"  结果将保存到: {config.output_path}")
-        print()
+        logger.info(f"  结果将保存到: {config.output_path}")
 
-    # ── 帧间隔控制（跳帧检测，但逐帧显示） ──
+    # ── 帧间隔控制（跳帧检测，逐帧显示） ──
     detect_counter = 0
 
     # ════════════════════════════════════════════
@@ -131,7 +138,7 @@ def main():
         while True:
             ret, frame = video_source.read()
             if not ret:
-                print("视频源已断开，退出。")
+                logger.error("视频源已断开。")
                 break
 
             # ── 检测（间隔执行，提高性能） ──
@@ -144,7 +151,6 @@ def main():
                 engine._frame_times.append(time.time())
                 if len(engine._frame_times) > 30:
                     engine._frame_times.pop(0)
-                result = None
 
             # ── 画面绘制（每一帧都画） ──
             vis = Visualizer.draw_all(frame, engine)
@@ -158,22 +164,22 @@ def main():
             key = cv2.waitKey(1) & 0xFF
 
             if key == ord('q'):
-                print("用户退出。")
+                logger.info("用户按 q 退出。")
                 break
             elif key == ord('r'):
                 engine.tracker.tracks.clear()
                 engine.alert_manager.clear_all()
-                print("已重置所有追踪器。")
+                logger.info("已重置所有追踪器。")
 
     except KeyboardInterrupt:
-        print("用户中断。")
+        logger.info("用户中断（Ctrl+C）。")
     finally:
         # ── 清理资源 ──
         video_source.release()
         if writer:
             writer.release()
         cv2.destroyAllWindows()
-        print("系统已安全关闭。")
+        logger.info("系统已安全关闭。")
 
 
 if __name__ == "__main__":

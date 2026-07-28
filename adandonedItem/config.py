@@ -56,6 +56,14 @@ class AppConfig:
     # ── 可视化 ────────────────────────────────────────────
     dist_threshold: int = 120      # "看管距离"（像素），在此距离内算有人看管
 
+    # ── 日志配置 ──────────────────────────────────────────
+    log_dir: str = "logs"                          # 日志目录
+    log_level: str = "INFO"                        # 根日志级别
+    log_max_bytes: int = 10 * 1024 * 1024          # 每个日志文件最大 10MB
+    log_backup_count: int = 5                      # 保留 5 个备份文件
+    log_console_level: str = "DEBUG"               # 控制台日志级别
+    log_file_level: str = "DEBUG"                  # 文件日志级别
+
     # ──────────────── 方法 ────────────────
 
     @classmethod
@@ -80,6 +88,12 @@ class AppConfig:
                 save_result=bool(data.get("save_result", cls.save_result)),
                 obj_conf_threshold=float(data.get("obj_conf", cls.obj_conf_threshold)),
                 person_conf_threshold=float(data.get("person_conf", cls.person_conf_threshold)),
+                log_dir=data.get("log_dir", cls.log_dir),
+                log_level=data.get("log_level", cls.log_level),
+                log_max_bytes=int(data.get("log_max_bytes", cls.log_max_bytes)),
+                log_backup_count=int(data.get("log_backup_count", cls.log_backup_count)),
+                log_console_level=data.get("log_console_level", cls.log_console_level),
+                log_file_level=data.get("log_file_level", cls.log_file_level),
             )
         except FileNotFoundError:
             return cls()            # 没有配置文件就用默认值

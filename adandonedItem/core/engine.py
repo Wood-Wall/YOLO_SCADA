@@ -15,6 +15,7 @@
   4. 判断无人看管 → 计时 → 超时告警
 """
 from __future__ import annotations
+import logging
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple
 import time
@@ -74,6 +75,38 @@ class AbandonedDetectorEngine:
 
     # ──────────────── 核心方法 ────────────────
 
+    def __init__(self, config: AppConfig):
+        self.config = config
+        self.detector = YOLODetector(config)
+        self.tracker = ObjectTracker(config)
+        self.alert_manager = AlertManager(cooldown=5.0)
+
+        # ── 人检测状态 ──
+        self._person_boxes: list[tuple] = []
+        self._person_miss_count: int = 0
+        self._person_present: bool = False
+
+        # ── 性能统计 ──
+        self._fps: float = 0.0
+        self._frame_times: list[float] = []
+        self._frame_count: int = 0
+
+        # ── 日志 ──
+        self._logger = logging.getLogger(__name__)
+        self._logger.info("引擎初始化完成，模型: %s", config.model_path)
+
+    # ──────────────── 属性 ────────────────
+
+    @property
+    def fps(self) -> float:
+        return self._fps
+
+    @property
+    def frame_count(self) -> int:
+        return self._frame_count
+
+    # ──────────────── 核心方法 ────────────────
+
     def process_frame(self, frame: np.ndarray) -> FrameResult:
         """
         处理单帧（完整的检测 → 追踪 → 告警管线）。
@@ -104,15 +137,16 @@ class AbandonedDetectorEngine:
         # Step 2: 人检测状态更新
         # ════════════════════════════════════════════
         if detection.has_person:
-            # 有人 → 更新人框，复位缺席计数
+            if not self._person_present:
+                self._logger.info("人进入画面，开始监控。")
             self._person_boxes = [p.bbox for p in detection.persons]
             self._person_miss_count = 0
             self._person_present = True
         else:
-            # 没人 → 缺席计数 +1
             self._person_miss_count += 1
             if self._person_miss_count >= self.config.person_clear_after:
-                # 连续缺席超过阈值 → 认为人确实已离开
+                if self._person_present:
+                    self._logger.info("人离开画面，进入无人监控模式。")
                 self._person_boxes = []
                 self._person_present = False
 
