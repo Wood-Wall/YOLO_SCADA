@@ -76,7 +76,7 @@ class Track:
         self.stationary_count = 0   # 累计"静止"次数
         self.is_stationary = False  # 是否已确认静止
         self.abandon_timer = 0.0    # 无人看管的累计秒数
-        self.alert = False          # 是否已经触发告警
+        self.alerted = False        # 是否已经触发告警
 
     def update(self, box):
         """
@@ -144,6 +144,65 @@ def is_person_near(obj_box, person_boxes, threshold = 120):
         dist = np.sqrt((obj_cx - per_cx)**2 + (obj_cy - per_cy)**2)
         if dist < threshold:
             return True
+
+def match_tracks(current_boxes, tracks, iou_threshold=0.3):
+    """
+    参数：
+    current_boxes   :  当前帧发现的全部物体边框
+    tracks          :   现有的追踪器字典
+    iou_threshold   :   iou匹配程度   
+    返回：
+    matched    = { 追踪器id: 匹配上的边框, ... }
+    new_boxes  = [没匹配到的边框, ...]  ← 这些要创建新追踪器   
+    """
+    # matched 字典：记录"哪个追踪器 → 匹配上了哪个框"
+    matched = {}
+    # new_boxes 列表：记录哪些框"谁都没匹配上" → 是新物体
+    new_boxes = []
+    # 记录哪些追踪器已经被匹配过了
+    used_ids = set()
+
+    # 遍历所有检测框，寻找最匹配的追踪器
+    for box in current_boxes:
+        best_id = None
+        best_iou = iou_threshold
+        # 和每个已有的追踪器比较
+        for tid, track in tracks.items():
+            if tid in used_ids:
+                continue    # 已经匹配了，过滤掉
+            # IOU计算
+            x1,y1,x2,y2 = box
+            tx1,ty1,tx2,ty2 = track.last_box    # 找到这个追踪器的最新坐标
+            # 算交集区域 
+            # 交集左上角 = 两个框的左上角中 找靠右下的作为交集区域左上角
+            inter_x1 = max(x1, tx1)
+            inter_y1 = max(y1, ty1)
+            # 交集右下角 = 两个框的右下角中 找靠左上的作为交集区域右下角
+            inter_x2 = min(x2, tx2)
+            inter_y2 = min(y2, ty2)
+
+            # 计算IOU，找到最匹配的追踪器
+            iou = 0
+            if inter_x1 < inter_x2 and inter_y1 < inter_y2:
+                inter_area = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
+                box_area = (x2 - x1) * (y2 - y1)
+                track_area = (tx2 - tx1) * (ty2 - ty1)
+                union_area = (box_area + track_area) - inter_area
+                if union_area > 0:
+                    iou = inter_area / union_area
+                if iou > best_iou:
+                    best_iou = iou
+                    best_id = tid
+
+        if best_id is not None:
+            # 匹配到了最适合的追踪器
+            matched[best_id] = box
+            used_ids.add(best_id)
+        else:
+            # 没有匹配到任何追踪器，新物体
+            new_boxes.append(box)
+
+    return matched, new_boxes
 
 def main():
     # 1. 解析命令行参数
@@ -226,7 +285,7 @@ def main():
             person_boxes = []
             obj_boxes = []
             is_dectected_person = False
-            #检查YOLO是否检测到东西
+            # 检查YOLO是否检测到东西
             if len(results) > 0 and results[0].boxes is not None:
                 boxes = results[0].boxes
                 #遍历每个物体
@@ -244,17 +303,110 @@ def main():
                             continue
                         x1,y1,x2,y2 = boxes.xyxy[i].cpu().numpy().astype(int)
                         obj_boxes.append((x1,y1,x2,y2,cls))
+            if is_dectected_person:
+                person_miss_count = 0
+            else:
+                person_miss_count += 1
+                if person_miss_count >= PERSON_CLEAR_AFTER:
+                    person_boxes.clear()
+            # 调试信息，打印
+            if DEBUG:
+                all_names = []
+                if len(results) > 0 and results[0].boxes is not None:
+                    all_boxes = results[0].boxes
+                    # 遍历所有检测框（不管有没有被置信度过滤掉）
+                    for j in range(len(all_boxes)):
+                        c = int(all_boxes.cls[j].item())
+                        conf_val = float(all_boxes.conf[j].item())
+                        # 查字典：数字编号 → 文字名称
+                        name = coco_names.get(c, f"class{c}")
+                        all_names.append(f"{name}({conf_val:.2f})")
+                    if all_names:
+                        # ', '.join(all_names) 把列表用逗号连接成字符串
+                        # 比如 ["person(0.85)", "backpack(0.72)"] → "person(0.85), backpack(0.72)"
+                        print(f"[帧 {frame_count}] 检测到: {', '.join(all_names)}")
+                    else:
+                        print(f"[帧 {frame_count}] 未检测到任何物体")
+
+            # 匹配追踪
+            current_objects = [(x1,y1,x2,y2) for (x1,y1,x2,y2,_) in obj_boxes]  # 只取边框坐标,建立新集合
+            # 匹配追踪器
+            matched, new_boxes = match_tracks(current_objects, tracks)
+            for tid, box in matched.items():  # 遍历匹配的追踪器
+                # 物体有匹配的追踪器，更新追踪器
+                tracks[tid].update(box)
+            # 没有匹配的追踪器，创建新追踪器
+            for box in new_boxes:
+                cls = None
+                # 查找新物体的类别
+                # 因为 new_boxes 是当前帧检测到的框，所以要遍历 obj_boxes 找到对应的类别
+                for obj_box in obj_boxes:
+                    if (obj_box[0], obj_box[1], obj_box[2], obj_box[3]) == box:
+                        cls = obj_box[4]
+                        break
+                # 查字典 
+                if cls is not None:
+                    class_name = coco_names.get(cls,"unknown") 
+                else:
+                    class_name = "unknown"
+                tracks[next_id] = Track(next_id, box, cls, class_name)
+                next_id += 1
+
+            # 清理消失的物体
+            for tid in list(tracks.keys()):
+                if tid not in matched:              # 本轮没匹配到
+                    tracks[tid].miss_count += 1
+                    if tracks[tid].miss_count >= MAX_MISS_FRAMES:
+                        print(f"追踪器 {tid} 消失，已删除")
+                        del tracks[tid]
+                else:                               # 本轮匹配到了 → 重置
+                    tracks[tid].miss_count = 0
+            
+            # 报警逻辑
+            for tid, track in tracks.items():
+                if track.alerted:
+                    continue        # 已经告警过了 跳过
+                if not track.is_stationary:
+                    continue        # 非静止物体不告警
+
+                # 报警之前是否有人靠近
+                if is_person_near(track.last_box, person_boxes, DIST_THRESHOLD):
+                    track.abandon_timer = 0.0 # 有人靠近，重置告警定时器
+                else:
+                        # 没人，累计时间
+                        track.abandon_timer += (SKIP_FRAMES + 1) / fps
+
+                        # 超过阈值，触发告警
+                        if track.abandon_timer >= abandon_seconds:
+                            track.alerted = True
+                            print(f"🚨 告警！{track.class_name}(ID:{track.id}) "
+                              f"已无人看管 {abandon_seconds} 秒！")
+
+        # 可视化
+        for tid, track in tracks.items():
+            x1, y1, x2, y2 = track.last_box
+
+            if track.alerted:
+                color = (0, 0, 255)         # 红色 - 已告警
+                status = f"ABANDONED! {track.class_name}"
+            elif track.is_stationary:
+                color = (0, 165, 255)       # 橙色 - 静止观察中
+                status = f"{track.class_name} {track.abandon_timer:.1f}s"
+            else:
+                color = (0, 255, 255)       # 黄色 - 还在移动
+                status = f"{track.class_name} moving"
+
+            # cv2.rectangle 画矩形：图片，左上角，右下角，颜色，线宽
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3)
+
+            # cv2.putText 写文字：图片，文字，位置，字体，大小，颜色，线宽
+            cv2.putText(frame, status, (x1, y1 - 10),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
         # 画人框
         for (px1,py1,px2,py2) in person_boxes:
             cv2.rectangle(frame,(px1,py1),(px2,py2),(0,255,0),2)
             cv2.putText(frame, "Person", (px1, py1 - 10),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-        # 物体，画黄色框
-        for (x1,y1,x2,y2,cls) in obj_boxes:
-            class_name = coco_names.get(cls,"unknown")
-            cv2.rectangle(frame,(x1, y1), (x2, y2), (0, 255, 255), 2)
-            cv2.putText(frame, class_name, (x1, y1 - 10),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
         # 画可疑物体
         cv2.imshow("Abandoned Object Detection", frame)
         key = cv2.waitKey(1) & 0xFF
@@ -274,5 +426,5 @@ if __name__ == "__main__":
     - 如果是被其他文件 import，__name__ 就是文件名，不会执行 main()
     这行代码 = "只有直接运行时才执行 main()"
     """
-    # 创建一个追踪器
+    # 启动主函数
     main()
